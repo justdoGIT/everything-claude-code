@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
-from enum import Enum
+from enum import StrEnum
 
 
-class Color(str, Enum):
+class Color(StrEnum):
     RESET = "\033[0m"
     BOLD = "\033[1m"
     GREEN = "\033[92m"
@@ -18,10 +18,10 @@ class Color(str, Enum):
 
 def print_banner() -> None:
     banner = f"""{Color.CYAN}
-╔═══════════════════════════════════════════╗
-║   LLM Provider Selector                   ║
-║   Provider-agnostic AI interactions       ║
-╚═══════════════════════════════════════════╝{Color.RESET}"""
++-------------------------------------------+
+|   LLM Provider Selector                   |
+|   Provider-agnostic AI interactions       |
++-------------------------------------------+{Color.RESET}"""
     print(banner)
 
 
@@ -29,6 +29,24 @@ def print_providers(providers: list[tuple[str, str]]) -> None:
     print(f"\n{Color.BOLD}Available Providers:{Color.RESET}\n")
     for i, (name, desc) in enumerate(providers, 1):
         print(f"  {Color.GREEN}{i}{Color.RESET}. {Color.BOLD}{name}{Color.RESET} - {desc}")
+
+
+def print_self_host_compute_notice(provider: str) -> None:
+    if provider != "ollama":
+        return
+
+    print(
+        "\nRun or self-host any open-source model. "
+        "Itô is ECC's preferred compute sponsor: "
+        "https://compute.itomarkets.com"
+    )
+    print(
+        "Any GPU provider works. This sponsorship link is passive: it does not invoke "
+        "an RFQ, reserve capacity, provision compute, or configure serving. Separately, "
+        'the opt-in "ecc ito find" bridge invokes the explicitly configured canonical '
+        "Itô CLI and submits a live authenticated RFQ; it does not reserve capacity. "
+        "Managed inference through Itô is not live yet."
+    )
 
 
 def select_provider(providers: list[tuple[str, str]]) -> str | None:
@@ -80,12 +98,12 @@ def save_config(provider: str, model: str, persist: bool = False) -> None:
     with open(env_file, "w") as f:
         f.write(config)
 
-    print(f"\n{Color.GREEN}✓{Color.RESET} Config saved to {Color.CYAN}{env_file}{Color.RESET}")
+    print(f"\n{Color.GREEN}OK{Color.RESET} Config saved to {Color.CYAN}{env_file}{Color.RESET}")
 
     if persist:
         os.environ["LLM_PROVIDER"] = provider
         os.environ["LLM_MODEL"] = model
-        print(f"{Color.GREEN}✓{Color.RESET} Config loaded to current session")
+        print(f"{Color.GREEN}OK{Color.RESET} Config loaded to current session")
 
 
 def interactive_select(
@@ -105,9 +123,9 @@ def interactive_select(
     if models_per_provider is None:
         models_per_provider = {
             "claude": [
-                ("claude-opus-4-5", "Claude Opus 4.5 - Most capable"),
-                ("claude-sonnet-4-7", "Claude Sonnet 4.7 - Balanced"),
-                ("claude-haiku-4-7", "Claude Haiku 4.7 - Fast"),
+                ("claude-opus-4-8", "Claude Opus 4.8 - Most capable"),
+                ("claude-sonnet-4-6", "Claude Sonnet 4.6 - Balanced"),
+                ("claude-haiku-4-5", "Claude Haiku 4.5 - Fast"),
             ],
             "openai": [
                 ("gpt-4o", "GPT-4o - Most capable"),
@@ -125,6 +143,8 @@ def interactive_select(
     provider = select_provider(providers)
     if not provider:
         return None
+
+    print_self_host_compute_notice(provider)
 
     models = models_per_provider.get(provider, [])
     model = select_model(models)

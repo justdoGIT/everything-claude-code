@@ -1,4 +1,4 @@
-# Contributing to Everything Claude Code
+# Contributing to ECC
 
 Thanks for wanting to contribute! This repo is a community resource for Claude Code users.
 
@@ -14,6 +14,10 @@ Thanks for wanting to contribute! This repo is a community resource for Claude C
 - [MCP and documentation (e.g. Context7)](#mcp-and-documentation-eg-context7)
 - [Cross-Harness and Translations](#cross-harness-and-translations)
 - [Pull Request Process](#pull-request-process)
+- [Releases](#releases)
+- [Guidelines](#guidelines)
+- [File Naming](#file-naming)
+- [Questions?](#questions)
 
 ---
 
@@ -52,8 +56,8 @@ Slash commands that invoke useful workflows:
 
 ```bash
 # 1. Fork and clone
-gh repo fork affaan-m/everything-claude-code --clone
-cd everything-claude-code
+gh repo fork affaan-m/ECC --clone
+cd ECC
 
 # 2. Create a branch
 git checkout -b feat/my-contribution
@@ -167,6 +171,8 @@ Short version:
 - [ ] Tested with Claude Code
 - [ ] Links to related skills
 - [ ] No sensitive data (API keys, tokens, paths)
+- [ ] Frontmatter declares `name:` matching the directory name
+- [ ] Frontmatter `description:` is an inline string or folded (`>`) scalar — not a literal block (`|`, `|-`, or `|+`), which preserves internal newlines and breaks flat-table renderers
 
 ### Example Skills
 
@@ -197,7 +203,7 @@ agents/your-agent-name.md
 ---
 name: your-agent-name
 description: What this agent does and when Claude should invoke it. Be specific!
-tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 ---
 
@@ -428,7 +434,34 @@ Translations live under `docs/` (e.g. `docs/zh-CN`, `docs/zh-TW`, `docs/ja-JP`).
 
 ---
 
+## Issue submission
+
+Please submit at most five Issues within any 20-minute period and keep at
+most ten Issues open at once. The [Issue moderation policy](.github/ISSUE_MODERATION.md)
+explains the automatic closure, reopening, and maintainer alert rules. Existing
+open Issues stay open when the policy takes effect.
+
 ## Pull Request Process
+
+### Submission volume
+
+Please submit at most five PRs within any 20-minute period. Automated moderation
+closes and locks excess PRs, including drafts. More than ten submissions within
+20 minutes triggers a maintainer alert and an account-block attempt. Closed PRs
+still count toward the window. Contributors with repository write access bypass
+burst moderation. Maintainers can review exceptions through the moderation alert.
+
+Please also keep at most ten PRs open at a time. When you open or reopen a PR
+above that cap, automation closes that PR with a comment explaining the count.
+PRs already open before this policy update stay open, even for authors above ten.
+A delayed check can close newer excess PRs already open when that check runs.
+The cap applies to every author, including maintainers. Get PRs merged or close
+the ones you no longer need, then reopen.
+Ten open PRs is more than any one reviewer can keep in flight, so this keeps
+review time on the work you care about most.
+
+See the [moderation runbook](.github/PR_MODERATION.md)
+for activation, credential requirements, and recovery.
 
 ### 1. PR Title Format
 
@@ -462,11 +495,44 @@ How you tested this.
 - [ ] Clear descriptions
 ```
 
-### 3. Review Process
+### 3. Before You Push (avoid red CI)
+
+Run `npm test` locally. It is the same gauntlet CI runs, and it catches almost everything below.
+
+- **Changed `package.json`?** If you touched `bin`, `files`, or dependencies, run `yarn install --mode=update-lockfile` and commit the `yarn.lock` change. CI runs Yarn in hardened mode on public PRs and fails if the lockfile would be modified, so a stale `yarn.lock` breaks the build on its own.
+- **Added a skill, command, agent, hook, or CLI tool?** Wire up every surface it belongs to:
+  - `package.json` (`bin` and `files`), `manifests/install-components.json`, `manifests/install-modules.json`, and `agent.yaml`
+  - Regenerate the catalog (`npm run catalog:sync`) and command registry (`npm run command-registry:write`)
+  - Update the docs tables (`README.md`, `COMMANDS-QUICK-REF.md`, `docs/COMMAND-AGENT-MAP.md`)
+  - New script path? Add it to the publish surface allowlist (`tests/scripts/npm-publish-surface.test.js`)
+  - Cross-harness: for Codex, add `.agents/skills/<name>/` plus `agents/openai.yaml`. The Codex frontmatter validator only allows `name`, `description`, `metadata`, `license`, and `allowed-tools`, so drop keys like `version` from that copy.
+
+### 4. Review Process
 
 1. Maintainers review within 48 hours
 2. Address feedback if requested
 3. Once approved, merged to main
+
+---
+
+## Releases
+
+Releases are cut on a regular cadence, roughly every two weeks, plus out-of-band
+patches for security or data-loss fixes.
+
+1. Sync the version everywhere: `VERSION`, `package.json`, and (via
+   `node scripts/build-pi-core.js`) `pi/core/package.json`.
+2. Update `CHANGELOG.md` and write reviewed release notes at
+   `docs/releases/<version>/release-notes.md` (required by the release workflow).
+3. Tag `vX.Y.Z` on `main` and push the tag. The `release.yml` workflow verifies
+   the tag is exactly on `origin/main`, checks the VERSION/pi/core sync, tests
+   the exact packed artifact on Linux, macOS, and Windows, publishes to npm with
+   provenance, verifies registry bytes, and creates the GitHub Release from the
+   reviewed notes.
+
+Tags and GitHub Releases are immutable once published: downstream packagers poll
+`/releases`, download `archive/refs/tags/vX.Y.Z.tar.gz`, and pin its sha256.
+Never move or re-tag a published version; ship a new patch version instead.
 
 ---
 
@@ -497,7 +563,7 @@ How you tested this.
 
 ## Questions?
 
-- **Issues:** [github.com/affaan-m/everything-claude-code/issues](https://github.com/affaan-m/everything-claude-code/issues)
+- **Issues:** [github.com/affaan-m/ECC/issues](https://github.com/affaan-m/ECC/issues)
 - **X/Twitter:** [@affaanmustafa](https://x.com/affaanmustafa)
 
 ---

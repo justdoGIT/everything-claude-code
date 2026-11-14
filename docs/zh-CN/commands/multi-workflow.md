@@ -2,6 +2,8 @@
 
 多模型协同开发工作流程（研究 → 构思 → 规划 → 执行 → 优化 → 审查），带有智能路由：前端 → Gemini，后端 → Codex。
 
+> **前提条件：** 此命令需要外部的 `ccg-workflow` 运行时，它**不**包含在基础 ECC 安装中。请运行 `npx ccg-workflow` 进行初始化，以配置此命令所依赖的 `~/.claude/bin/codeagent-wrapper` 和 `~/.claude/.ccg/prompts/*` 角色文件。没有该运行时，此命令将无法正常运行。
+
 结构化开发工作流程，包含质量门控、MCP 服务和多模型协作。
 
 ## 使用方法
@@ -37,7 +39,7 @@
 ```
 # 新会话调用
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend <codex|gemini> {{GEMINI_MODEL_FLAG}}- \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend <codex|gemini> - \"$PWD\" <<'EOF'
 ROLE_FILE: <角色提示文件路径>
 <TASK>
 需求: <增强后的需求（如未增强则为$ARGUMENTS）>
@@ -52,7 +54,7 @@ EOF",
 
 # 恢复会话调用
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend <codex|gemini> {{GEMINI_MODEL_FLAG}}resume <SESSION_ID> - \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend <codex|gemini> resume <SESSION_ID> - \"$PWD\" <<'EOF'
 ROLE_FILE: <角色提示文件路径>
 <TASK>
 需求: <增强后的需求（如未增强则为$ARGUMENTS）>
@@ -68,7 +70,7 @@ EOF",
 
 **模型参数说明**：
 
-* `{{GEMINI_MODEL_FLAG}}`: 当使用 `--backend gemini` 时，替换为 `--gemini-model gemini-3-pro-preview`（注意末尾空格）；对于 codex 使用空字符串
+* ``: 当使用 `--backend gemini` 时，替换为 `--gemini-model gemini-3-pro-preview`（注意末尾空格）；对于 codex 使用空字符串
 
 **角色提示词**：
 

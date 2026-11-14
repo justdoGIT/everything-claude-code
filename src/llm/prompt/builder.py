@@ -5,10 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from llm.core.types import LLMInput, Message, Role, ToolDefinition
-from llm.providers.claude import ClaudeProvider
-from llm.providers.openai import OpenAIProvider
-from llm.providers.ollama import OllamaProvider
+from llm.core.types import Message, Role, ToolDefinition
 
 
 @dataclass
@@ -20,8 +17,41 @@ class PromptConfig:
 
 
 class PromptBuilder:
-    def __init__(self, config: PromptConfig | None = None) -> None:
-        self.config = config or PromptConfig()
+    def __init__(
+        self,
+        config: PromptConfig | None = None,
+        *,
+        system_template: str | None = None,
+        user_template: str | None = None,
+        include_tools_in_system: bool | None = None,
+        tool_format: str | None = None,
+    ) -> None:
+        if config is not None and any(
+            value is not None
+            for value in (system_template, user_template, include_tools_in_system, tool_format)
+        ):
+            raise ValueError("Pass either config or PromptBuilder keyword options, not both")
+
+        if config is None:
+            defaults = PromptConfig()
+            config = PromptConfig(
+                system_template=(
+                    system_template if system_template is not None else defaults.system_template
+                ),
+                user_template=(
+                    user_template if user_template is not None else defaults.user_template
+                ),
+                include_tools_in_system=(
+                    include_tools_in_system
+                    if include_tools_in_system is not None
+                    else defaults.include_tools_in_system
+                ),
+                tool_format=(
+                    tool_format if tool_format is not None else defaults.tool_format
+                ),
+            )
+
+        self.config = config
 
     def build(self, messages: list[Message], tools: list[ToolDefinition] | None = None) -> list[Message]:
         if not messages:
@@ -88,7 +118,7 @@ _PROVIDER_TEMPLATE_MAP: dict[str, dict[str, Any]] = {
 
 
 def get_provider_builder(provider_name: str) -> PromptBuilder:
-    config_dict = _PROVIDER_TEMPLATE_MAP.get(provider_name.lower(), {})
+    config_dict = _PROVIDER_TEMPLATE_MAP.get(provider_name.strip().lower(), {})
     config = PromptConfig(**config_dict)
     return PromptBuilder(config)
 

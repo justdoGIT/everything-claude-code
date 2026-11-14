@@ -2,6 +2,8 @@
 
 マルチモデル協調開発ワークフロー(調査 → アイデア創出 → 計画 → 実装 → 最適化 → レビュー)、インテリジェントルーティング: フロントエンド → Gemini、バックエンド → Codex。
 
+> **前提条件:** このコマンドは外部の `ccg-workflow` ランタイムを必要とします。これはベースの ECC インストールには**含まれていません**。`npx ccg-workflow` を実行して初期化し、このコマンドが依存する `~/.claude/bin/codeagent-wrapper` と `~/.claude/.ccg/prompts/*` ロールファイルをプロビジョニングしてください。このランタイムがないと、このコマンドは正しく動作しません。
+
 品質ゲート、MCPサービス、マルチモデル連携を備えた構造化開発ワークフロー。
 
 ## 使用方法
@@ -36,7 +38,7 @@
 ```
 # 新規セッション呼び出し
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend <codex|gemini> {{GEMINI_MODEL_FLAG}}- \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend <codex|gemini> - \"$PWD\" <<'EOF'
 ROLE_FILE: <ロールプロンプトパス>
 <TASK>
 Requirement: <強化された要件(または強化されていない場合は$ARGUMENTS)>
@@ -51,7 +53,7 @@ EOF",
 
 # セッション再開呼び出し
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend <codex|gemini> {{GEMINI_MODEL_FLAG}}resume <SESSION_ID> - \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend <codex|gemini> resume <SESSION_ID> - \"$PWD\" <<'EOF'
 ROLE_FILE: <ロールプロンプトパス>
 <TASK>
 Requirement: <強化された要件(または強化されていない場合は$ARGUMENTS)>
@@ -66,7 +68,7 @@ EOF",
 ```
 
 **モデルパラメータの注意事項**:
-- `{{GEMINI_MODEL_FLAG}}`: `--backend gemini`を使用する場合、`--gemini-model gemini-3-pro-preview`で置き換える(末尾のスペースに注意); codexの場合は空文字列を使用
+- ``: `--backend gemini`を使用する場合、`--gemini-model gemini-3-pro-preview`で置き換える(末尾のスペースに注意); codexの場合は空文字列を使用
 
 **ロールプロンプト**:
 

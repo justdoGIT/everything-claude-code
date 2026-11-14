@@ -11,6 +11,21 @@ const DEFAULT_TARGET = 'claude';
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 20;
 const SCHEMA_VERSION = 'ecc.consult.v1';
+const FUZZY_EXCLUDED_TOKENS = new Set(['review']);
+const MACHINE_LEARNING_CONTEXT_TOKENS = new Set([
+  'data-science',
+  'evals',
+  'evaluation',
+  'inference',
+  'ml',
+  'mle',
+  'mlops',
+  'model',
+  'models',
+  'pytorch',
+  'serving',
+  'training',
+]);
 
 const STOP_WORDS = new Set([
   'a',
@@ -57,6 +72,32 @@ const COMPONENT_ALIASES = Object.freeze({
   'capability:social': ['distribution', 'post', 'posting', 'publish', 'publishing', 'twitter', 'x'],
   'capability:media': ['editing', 'image', 'remotion', 'slides', 'video'],
   'capability:orchestration': ['dmux', 'parallel', 'tmux', 'worktree', 'worktrees'],
+  'capability:machine-learning': [
+    'data-science',
+    'ml',
+    'mle',
+    'mlops',
+    'model',
+    'models',
+    'pytorch',
+    'training',
+  ],
+  'agent:mle-reviewer': [
+    'data-science',
+    'ml',
+    'mle',
+    'mlops',
+    'model',
+    'models',
+    'pytorch',
+    'training',
+    'inference',
+    'serving',
+    'evaluation',
+    'evals',
+    'model-review',
+    'review-training',
+  ],
   'framework:nextjs': ['next', 'next.js', 'nextjs'],
   'framework:react': ['react', 'tsx'],
   'framework:django': ['django'],
@@ -199,14 +240,14 @@ function parseArgs(argv) {
 
 function commandFor(kind, id, target) {
   if (kind === 'profile') {
-    return `npx ecc install --profile ${id} --target ${target}`;
+    return `npx ecc-universal install --profile ${id} --target ${target}`;
   }
 
-  return `npx ecc install --profile minimal --target ${target} --with ${id}`;
+  return `npx ecc-universal install --profile minimal --target ${target} --with ${id}`;
 }
 
 function planCommandFor(componentId, target) {
-  return `npx ecc plan --profile minimal --target ${target} --with ${componentId}`;
+  return `npx ecc-universal plan --profile minimal --target ${target} --with ${componentId}`;
 }
 
 function buildSearchCorpus(parts) {
@@ -227,6 +268,7 @@ function scoreAgainstQuery(queryTokens, corpusTokens, options = {}) {
 
     if (
       token.length >= 4
+      && !FUZZY_EXCLUDED_TOKENS.has(token)
       && [...corpus].some(corpusToken => (
         corpusToken.length >= 4
         && (corpusToken.includes(token) || token.includes(corpusToken))
@@ -247,6 +289,7 @@ function scoreAgainstQuery(queryTokens, corpusTokens, options = {}) {
 function preferredComponentBonus(component, queryTokens) {
   let bonus = 0;
   const suffix = component.id.split(':')[1];
+  const hasMachineLearningContext = queryTokens.some(token => MACHINE_LEARNING_CONTEXT_TOKENS.has(token));
 
   if (queryTokens[0] === suffix) {
     bonus += 5;
@@ -256,7 +299,17 @@ function preferredComponentBonus(component, queryTokens) {
     bonus += 3;
   }
 
-  if (component.id === 'capability:security' && queryTokens.some(token => ['audit', 'review', 'security'].includes(token))) {
+  if (component.id === 'agent:mle-reviewer' && hasMachineLearningContext) {
+    bonus += 2;
+  }
+
+  if (
+    component.id === 'capability:security'
+    && (
+      queryTokens.some(token => ['audit', 'security', 'threat', 'vulnerability'].includes(token))
+      || (!hasMachineLearningContext && queryTokens.includes('review'))
+    )
+  ) {
     bonus += 4;
   }
 
@@ -368,7 +421,7 @@ function buildConsultation(options) {
         `Install it: ${matches[0].installCommand}`,
       ]
       : [
-        'Run `npx ecc catalog components` to browse all components.',
+        'Run `npx ecc-universal catalog components` to browse all components.',
         'Try a more specific query such as "security review", "Next.js", or "operator workflows".',
       ],
   };
@@ -384,7 +437,7 @@ function formatText(payload) {
 
   if (payload.matches.length === 0) {
     lines.push('No strong component matches found.');
-    lines.push('Try: npx ecc catalog components');
+    lines.push('Try: npx ecc-universal catalog components');
   } else {
     lines.push('Recommended components:');
     payload.matches.forEach((match, index) => {

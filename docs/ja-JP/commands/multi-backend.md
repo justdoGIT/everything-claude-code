@@ -2,6 +2,8 @@
 
 バックエンド中心のワークフロー(調査 → アイデア創出 → 計画 → 実装 → 最適化 → レビュー)、Codex主導。
 
+> **前提条件:** このコマンドは外部の `ccg-workflow` ランタイムを必要とします。これはベースの ECC インストールには**含まれていません**。`npx ccg-workflow` を実行して初期化し、このコマンドが依存する `~/.claude/bin/codeagent-wrapper` と `~/.claude/.ccg/prompts/*` ロールファイルをプロビジョニングしてください。このランタイムがないと、このコマンドは正しく動作しません。
+
 ## 使用方法
 
 ```bash
@@ -32,7 +34,7 @@
 ```
 # 新規セッション呼び出し
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend codex - \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend codex - \"$PWD\" <<'EOF'
 ROLE_FILE: <ロールプロンプトパス>
 <TASK>
 Requirement: <強化された要件(または強化されていない場合は$ARGUMENTS)>
@@ -47,7 +49,7 @@ EOF",
 
 # セッション再開呼び出し
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend codex resume <SESSION_ID> - \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend codex resume <SESSION_ID> - \"$PWD\" <<'EOF'
 ROLE_FILE: <ロールプロンプトパス>
 <TASK>
 Requirement: <強化された要件(または強化されていない場合は$ARGUMENTS)>

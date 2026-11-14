@@ -11,7 +11,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const validatorsDir = path.join(__dirname, '..', '..', 'scripts', 'ci');
 const repoRoot = path.join(__dirname, '..', '..');
@@ -50,6 +50,29 @@ function writeInstallComponentsManifest(testDir, components) {
     version: 1,
     components,
   });
+}
+
+function writeInstallModulesManifest(testDir, modules) {
+  writeJson(path.join(testDir, 'manifests', 'install-modules.json'), {
+    version: 1,
+    modules,
+  });
+}
+
+function writeInstallProfilesManifest(testDir, profiles) {
+  writeJson(path.join(testDir, 'manifests', 'install-profiles.json'), {
+    version: 1,
+    profiles,
+  });
+}
+
+function writeSkillFixture(testDir, skillId, description) {
+  const skillDir = path.join(testDir, 'skills', skillId);
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, 'SKILL.md'),
+    `---\nname: ${skillId}\ndescription: ${description}\n---\n# ${skillId}\n`
+  );
 }
 
 function stripShebang(source) {
@@ -162,13 +185,18 @@ function runCatalogValidator(overrides = {}) {
   const argvPreamble = argv.map(arg => `process.argv.push(${JSON.stringify(arg)});`).join('\n');
   source = `${argvPreamble}\n${source}`;
 
+  const resolvedRoot = overrides.ROOT || repoRoot;
   const resolvedOverrides = {
-    ROOT: repoRoot,
-    README_PATH: path.join(repoRoot, 'README.md'),
-    AGENTS_PATH: path.join(repoRoot, 'AGENTS.md'),
-    README_ZH_CN_PATH: path.join(repoRoot, 'README.zh-CN.md'),
-    DOCS_ZH_CN_README_PATH: path.join(repoRoot, 'docs', 'zh-CN', 'README.md'),
-    DOCS_ZH_CN_AGENTS_PATH: path.join(repoRoot, 'docs', 'zh-CN', 'AGENTS.md'),
+    ROOT: resolvedRoot,
+    README_PATH: path.join(resolvedRoot, 'README.md'),
+    AGENTS_PATH: path.join(resolvedRoot, 'AGENTS.md'),
+    README_ZH_CN_PATH: path.join(resolvedRoot, 'README.zh-CN.md'),
+    DOCS_ZH_CN_README_PATH: path.join(resolvedRoot, 'docs', 'zh-CN', 'README.md'),
+    DOCS_ZH_CN_AGENTS_PATH: path.join(resolvedRoot, 'docs', 'zh-CN', 'AGENTS.md'),
+    PLUGIN_JSON_PATH: path.join(resolvedRoot, '.claude-plugin', 'plugin.json'),
+    MARKETPLACE_JSON_PATH: path.join(resolvedRoot, '.claude-plugin', 'marketplace.json'),
+    SOUL_PATH: path.join(resolvedRoot, 'SOUL.md'),
+    GEMINI_PATH: path.join(resolvedRoot, '.gemini', 'GEMINI.md'),
     ...overrides,
   };
 
@@ -180,9 +208,61 @@ function runCatalogValidator(overrides = {}) {
   return runSourceViaTempFile(source);
 }
 
+// Run validate-skills.js against a fixture dir, optionally passing
+// extra argv (e.g. '--strict') and env overrides (e.g.
+// CI_STRICT_SKILLS=1) so the frontmatter finding suite can exercise
+// both warn and strict modes via argv and env code paths.
+//
+// Captures stderr on both success and failure (the shared
+// runSourceViaTempFile helper only surfaces stderr when the child
+// exits non-zero, which hides WARN lines in the default mode).
+function runSkillsValidator(testDir, argv = [], envOverrides = {}, docsDir) {
+  const validatorPath = path.join(validatorsDir, 'validate-skills.js');
+  let source = fs.readFileSync(validatorPath, 'utf8');
+  source = stripShebang(source);
+  source = source.replace(
+    /const SKILLS_DIR = .*?;/,
+    `const SKILLS_DIR = ${JSON.stringify(testDir)};`,
+  );
+  // Default to a nonexistent docs root so tests exercising only
+  // SKILLS_DIR aren't polluted by this repo's real docs/*/skills/ tree.
+  source = source.replace(
+    /const DOCS_DIR = .*?;/,
+    `const DOCS_DIR = ${JSON.stringify(docsDir || '/nonexistent-docs-dir-for-tests')};`,
+  );
+  if (argv.length > 0) {
+    const argvPreamble = argv
+      .map(arg => `process.argv.push(${JSON.stringify(arg)});`)
+      .join('\n');
+    source = `${argvPreamble}\n${source}`;
+  }
+  const tmpFile = path.join(repoRoot,
+    `.tmp-validator-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+  try {
+    fs.writeFileSync(tmpFile, source, 'utf8');
+    const r = spawnSync('node', [tmpFile], {
+      encoding: 'utf8',
+      timeout: 10000,
+      cwd: repoRoot,
+      env: { ...process.env, CI_STRICT_SKILLS: '', ...envOverrides },
+    });
+    return {
+      code: typeof r.status === 'number' ? r.status : 1,
+      stdout: r.stdout || '',
+      stderr: r.stderr || '',
+    };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch (_) { /* ignore */ }
+  }
+}
+
 function writeCatalogFixture(testDir, options = {}) {
   const {
     readmeCounts = { agents: 1, skills: 1, commands: 1 },
+    readmeProjectTreeAgents = readmeCounts.agents,
+    readmeProjectTreeSkills = readmeCounts.skills,
+    readmeProjectTreeCommands = readmeCounts.commands,
+    readmeExtraTreeBlock = '',
     readmeTableCounts = readmeCounts,
     readmeParityCounts = readmeCounts,
     readmeUnrelatedSkillsCount = 16,
@@ -203,6 +283,9 @@ function writeCatalogFixture(testDir, options = {}) {
       'skills/          — 1 个工作流技能和领域知识',
       'commands/        — 1 个斜杠命令',
     ],
+    pluginCounts = { agents: 1, skills: 1, commands: 1 },
+    marketplaceCounts = { agents: 1, skills: 1, commands: 1 },
+    crossHarnessCounts = { agents: 1, skills: 1, commands: 1 },
   } = options;
 
   const readmePath = path.join(testDir, 'README.md');
@@ -210,23 +293,50 @@ function writeCatalogFixture(testDir, options = {}) {
   const zhRootReadmePath = path.join(testDir, 'README.zh-CN.md');
   const zhDocsReadmePath = path.join(testDir, 'docs', 'zh-CN', 'README.md');
   const zhAgentsPath = path.join(testDir, 'docs', 'zh-CN', 'AGENTS.md');
+  const pluginJsonPath = path.join(testDir, '.claude-plugin', 'plugin.json');
+  const marketplaceJsonPath = path.join(testDir, '.claude-plugin', 'marketplace.json');
+  const soulPath = path.join(testDir, 'SOUL.md');
+  const geminiPath = path.join(testDir, '.gemini', 'GEMINI.md');
 
   fs.mkdirSync(path.join(testDir, 'agents'), { recursive: true });
   fs.mkdirSync(path.join(testDir, 'commands'), { recursive: true });
   fs.mkdirSync(path.join(testDir, 'skills', 'demo-skill'), { recursive: true });
   fs.mkdirSync(path.join(testDir, 'docs', 'zh-CN'), { recursive: true });
+  fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+  fs.mkdirSync(path.join(testDir, '.gemini'), { recursive: true });
 
   fs.writeFileSync(path.join(testDir, 'agents', 'planner.md'), '---\nmodel: sonnet\ntools: Read\n---\n# Planner');
   fs.writeFileSync(path.join(testDir, 'commands', 'plan.md'), '---\ndescription: Plan\n---\n# Plan');
   fs.writeFileSync(path.join(testDir, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill\norigin: ECC\n---\n# Demo Skill');
 
-  fs.writeFileSync(readmePath, `Access to ${readmeCounts.agents} agents, ${readmeCounts.skills} skills, and ${readmeCounts.commands} commands.\n| Feature | Claude Code | Cursor IDE | Codex CLI | OpenCode |\n|---------|------------|------------|-----------|----------|\n| Agents | PASS: ${readmeTableCounts.agents} agents | Shared | Shared | 1 |\n| Commands | PASS: ${readmeTableCounts.commands} commands | Shared | Shared | 1 |\n| Skills | PASS: ${readmeTableCounts.skills} skills | Shared | Shared | 1 |\n\n| Feature | Count | Format |\n|-----------|-------|---------|\n| Skills | ${readmeUnrelatedSkillsCount} | .agents/skills/ |\n\n## Cross-Tool Feature Parity\n\n| Feature | Claude Code | Cursor IDE | Codex CLI | OpenCode |\n|---------|------------|------------|-----------|----------|\n| **Agents** | ${readmeParityCounts.agents} | Shared (AGENTS.md) | Shared (AGENTS.md) | 12 |\n| **Commands** | ${readmeParityCounts.commands} | Shared | Instruction-based | 31 |\n| **Skills** | ${readmeParityCounts.skills} | Shared | 10 (native format) | 37 |\n`);
+  fs.writeFileSync(readmePath, `Access to ${readmeCounts.agents} agents, ${readmeCounts.skills} skills, and ${readmeCounts.commands} commands.\n- **Public surface synced to the live repo** - metadata, catalog counts, plugin manifests, and install-facing docs now match the actual OSS surface: ${readmeCounts.agents} agents, ${readmeCounts.skills} skills, and ${readmeCounts.commands} legacy command shims.\n|-- agents/           # ${readmeProjectTreeAgents} specialized subagents for delegation
+|-- skills/           # ${readmeProjectTreeSkills} reusable workflows loaded on demand
+|-- commands/         # ${readmeProjectTreeCommands} maintained slash-command shims
+${readmeExtraTreeBlock}\n| Feature | Claude Code | Cursor IDE | Codex CLI | OpenCode |\n|---------|------------|------------|-----------|----------|\n| Agents | PASS: ${readmeTableCounts.agents} agents | Shared | Shared | 1 |\n| Commands | PASS: ${readmeTableCounts.commands} commands | Shared | Shared | 1 |\n| Skills | PASS: ${readmeTableCounts.skills} skills | Shared | Shared | 1 |\n\n| Feature | Count | Format |\n|-----------|-------|---------|\n| Skills | ${readmeUnrelatedSkillsCount} | .agents/skills/ |\n\n## Cross-Tool Feature Parity\n\n| Feature | Claude Code | Cursor IDE | Codex CLI | OpenCode |\n|---------|------------|------------|-----------|----------|\n| **Agents** | ${readmeParityCounts.agents} | Shared (AGENTS.md) | Shared (AGENTS.md) | 12 |\n| **Commands** | ${readmeParityCounts.commands} | Shared | Instruction-based | 31 |\n| **Skills** | ${readmeParityCounts.skills} | Shared | 10 (native format) | 37 |\n`);
   fs.writeFileSync(agentsPath, `This is a **production-ready AI coding plugin** providing ${summaryCounts.agents} specialized agents, ${summaryCounts.skills} skills, ${summaryCounts.commands} commands, and automated hook workflows for software development.\n\n\`\`\`\n${structureLines.join('\n')}\n\`\`\`\n`);
   fs.writeFileSync(zhRootReadmePath, `**完成！** 你现在可以使用 ${zhRootReadmeCounts.agents} 个代理、${zhRootReadmeCounts.skills} 个技能和 ${zhRootReadmeCounts.commands} 个命令。\n`);
   fs.writeFileSync(zhDocsReadmePath, `**搞定！** 你现在可以使用 ${zhDocsReadmeCounts.agents} 个智能体、${zhDocsReadmeCounts.skills} 项技能和 ${zhDocsReadmeCounts.commands} 个命令了。\n| 功能特性 | Claude Code | OpenCode | 状态 |\n|---------|-------------|----------|--------|\n| 智能体 | \u2705 ${zhDocsTableCounts.agents} 个 | \u2705 12 个 | **Claude Code 领先** |\n| 命令 | \u2705 ${zhDocsTableCounts.commands} 个 | \u2705 31 个 | **Claude Code 领先** |\n| 技能 | \u2705 ${zhDocsTableCounts.skills} 项 | \u2705 37 项 | **Claude Code 领先** |\n\n| 功能特性 | 数量 | 格式 |\n|-----------|-------|---------|\n| 技能 | ${zhDocsUnrelatedSkillsCount} | .agents/skills/ |\n\n## 跨工具功能对等\n\n| 功能特性 | Claude Code | Cursor IDE | Codex CLI | OpenCode |\n|---------|------------|------------|-----------|----------|\n| **智能体** | ${zhDocsParityCounts.agents} | 共享 (AGENTS.md) | 共享 (AGENTS.md) | 12 |\n| **命令** | ${zhDocsParityCounts.commands} | 共享 | 基于指令 | 31 |\n| **技能** | ${zhDocsParityCounts.skills} | 共享 | 10 (原生格式) | 37 |\n`);
   fs.writeFileSync(zhAgentsPath, `这是一个**生产就绪的 AI 编码插件**，提供 ${zhAgentsSummaryCounts.agents} 个专业代理、${zhAgentsSummaryCounts.skills} 项技能、${zhAgentsSummaryCounts.commands} 条命令以及自动化钩子工作流，用于软件开发。\n\n\`\`\`\n${zhAgentsStructureLines.join('\n')}\n\`\`\`\n`);
+  fs.writeFileSync(pluginJsonPath, JSON.stringify({
+    name: 'ecc',
+    description: `Battle-tested plugin — ${pluginCounts.agents} agents, ${pluginCounts.skills} skills, ${pluginCounts.commands} legacy command shims`,
+  }, null, 2));
+  fs.writeFileSync(marketplaceJsonPath, JSON.stringify({
+    plugins: [{
+      name: 'ecc',
+      description: `Marketplace plugin — ${marketplaceCounts.agents} agents, ${marketplaceCounts.skills} skills, ${marketplaceCounts.commands} legacy command shims`,
+    }],
+  }, null, 2));
+  fs.writeFileSync(
+    soulPath,
+    `ECC is a production-ready AI coding plugin with ${crossHarnessCounts.agents} specialized agents, ${crossHarnessCounts.skills} skills, ${crossHarnessCounts.commands} commands, and automated hook workflows.\n`
+  );
+  fs.writeFileSync(
+    geminiPath,
+    `ECC is a cross-harness coding system with ${crossHarnessCounts.agents} specialized agents, ${crossHarnessCounts.skills} skills, and ${crossHarnessCounts.commands} commands.\n`
+  );
 
-  return { readmePath, agentsPath, zhRootReadmePath, zhDocsReadmePath, zhAgentsPath };
+  return { readmePath, agentsPath, zhRootReadmePath, zhDocsReadmePath, zhAgentsPath, pluginJsonPath, marketplaceJsonPath, soulPath, geminiPath };
 }
 
 function runTests() {
@@ -357,6 +467,110 @@ function runTests() {
   })) passed++; else failed++;
 
   // ==========================================
+  // check-hooks-schema-keys.js
+  // ==========================================
+  console.log('\ncheck-hooks-schema-keys.js:');
+
+  if (test('passes on real project hooks configs', () => {
+    const result = runValidator('check-hooks-schema-keys');
+    assert.strictEqual(result.code, 0, `Should pass, got stderr: ${result.stderr}`);
+    assert.ok(result.stdout.includes('Checked 2 hooks config(s)'), 'Should report both configs checked');
+  })) passed++; else failed++;
+
+  if (test('exits 0 when hooks.json does not exist', () => {
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', '/nonexistent/hooks.json');
+    assert.strictEqual(result.code, 0, 'Should skip when no hooks.json');
+    assert.ok(result.stdout.includes('skipping'), 'Should say skipping');
+  })) passed++; else failed++;
+
+  if (test('fails on root $schema key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      $schema: '../schemas/hooks.schema.json',
+      hooks: {}
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on root $schema');
+    assert.ok(result.stderr.includes('"$schema"'), 'Should name the offending key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on group id and description keys', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: 'test:group',
+          description: 'metadata that belongs in the sidecar',
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: 'echo hi' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on group id/description');
+    assert.ok(result.stderr.includes('"id"'), 'Should name id');
+    assert.ok(result.stderr.includes('"description"'), 'Should name description');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on unknown handler key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'echo hi', label: 'not a loader key' }] }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on unknown handler key');
+    assert.ok(result.stderr.includes('"label"'), 'Should name the offending handler key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on codex-hooks.json root $schema key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'codex-hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      $schema: '../schemas/hooks.schema.json',
+      description: 'codex projection',
+      hooks: {
+        SessionStart: [{ id: 'session:start', matcher: '.*', hooks: [{ type: 'command', command: 'echo hi' }] }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'CODEX_HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on codex root $schema');
+    assert.ok(result.stderr.includes('"$schema"'), 'Should name the offending key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('accepts codex documented keys including group id and root description', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'codex-hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      description: 'codex projection',
+      hooks: {
+        SessionStart: [{
+          id: 'session:start',
+          description: 'pinned by plugin-manifest test',
+          matcher: '.*',
+          hooks: [{ type: 'command', command: 'echo hi', timeout: 5 }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'CODEX_HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 0, `Should pass, got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  // ==========================================
   // catalog.js
   // ==========================================
   console.log('\ncatalog.js:');
@@ -375,6 +589,8 @@ function runTests() {
       zhRootReadmePath,
       zhDocsReadmePath,
       zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
     } = writeCatalogFixture(testDir, {
       readmeCounts: { agents: 99, skills: 99, commands: 99 },
       readmeTableCounts: { agents: 99, skills: 99, commands: 99 },
@@ -404,6 +620,8 @@ function runTests() {
       README_ZH_CN_PATH: zhRootReadmePath,
       DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
       DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
     });
 
     assert.strictEqual(result.code, 1, 'Should fail when catalog counts drift');
@@ -411,7 +629,43 @@ function runTests() {
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
-  if (test('fails when README parity table counts drift', () => {
+  if (test('fails when cross-harness identity counts drift', () => {
+    const testDir = createTestDir();
+    const {
+      readmePath,
+      agentsPath,
+      soulPath,
+      geminiPath,
+      zhRootReadmePath,
+      zhDocsReadmePath,
+      zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
+    } = writeCatalogFixture(testDir, {
+      crossHarnessCounts: { agents: 9, skills: 8, commands: 7 },
+    });
+
+    const result = runCatalogValidator({
+      ROOT: testDir,
+      README_PATH: readmePath,
+      AGENTS_PATH: agentsPath,
+      SOUL_PATH: soulPath,
+      GEMINI_PATH: geminiPath,
+      README_ZH_CN_PATH: zhRootReadmePath,
+      DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
+      DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
+    });
+
+    assert.strictEqual(result.code, 1, 'Should fail when cross-harness counts drift');
+    const output = result.stdout + result.stderr;
+    assert.ok(output.includes('SOUL.md'), 'Should report SOUL.md mismatches');
+    assert.ok(output.includes('.gemini/GEMINI.md'), 'Should report GEMINI.md mismatches');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('does not require obsolete cross-harness parity counts in README', () => {
     const testDir = createTestDir();
     const {
       readmePath,
@@ -419,6 +673,8 @@ function runTests() {
       zhRootReadmePath,
       zhDocsReadmePath,
       zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
     } = writeCatalogFixture(testDir, {
       readmeCounts: { agents: 1, skills: 1, commands: 1 },
       readmeTableCounts: { agents: 1, skills: 1, commands: 1 },
@@ -433,13 +689,11 @@ function runTests() {
       README_ZH_CN_PATH: zhRootReadmePath,
       DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
       DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
     });
 
-    assert.strictEqual(result.code, 1, 'Should fail when README parity table drifts');
-    assert.ok(
-      (result.stdout + result.stderr).includes('README.md parity table'),
-      'Should mention the README parity table mismatch'
-    );
+    assert.strictEqual(result.code, 0, 'Catalog counts should be validated from inventory surfaces, not parity claims');
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -450,6 +704,8 @@ function runTests() {
       agentsPath,
       zhRootReadmePath,
       zhDocsReadmePath,
+      pluginJsonPath,
+      marketplaceJsonPath,
     } = writeCatalogFixture(testDir);
     const missingZhAgentsPath = path.join(testDir, 'docs', 'zh-CN', 'AGENTS.md');
     fs.rmSync(missingZhAgentsPath);
@@ -461,6 +717,8 @@ function runTests() {
       README_ZH_CN_PATH: zhRootReadmePath,
       DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
       DOCS_ZH_CN_AGENTS_PATH: missingZhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
     });
 
     assert.strictEqual(result.code, 1, 'Should fail when a tracked doc is missing');
@@ -476,9 +734,13 @@ function runTests() {
     const {
       readmePath,
       agentsPath,
+      soulPath,
+      geminiPath,
       zhRootReadmePath,
       zhDocsReadmePath,
       zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
     } = writeCatalogFixture(testDir, {
       readmeCounts: { agents: 9, skills: 9, commands: 9 },
       readmeTableCounts: { agents: 8, skills: 8, commands: 8 },
@@ -489,6 +751,9 @@ function runTests() {
       zhDocsTableCounts: { agents: 12, skills: 12, commands: 12 },
       zhDocsParityCounts: { agents: 13, skills: 13, commands: 13 },
       zhAgentsSummaryCounts: { agents: 14, skills: 14, commands: 14 },
+      pluginCounts: { agents: 18, skills: 18, commands: 18 },
+      marketplaceCounts: { agents: 19, skills: 19, commands: 19 },
+      crossHarnessCounts: { agents: 18, skills: 18, commands: 18 },
       zhAgentsStructureLines: [
         'agents/          — 15 个专业子代理',
         'skills/          — 16 个工作流技能和领域知识',
@@ -504,6 +769,10 @@ function runTests() {
       README_ZH_CN_PATH: zhRootReadmePath,
       DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
       DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
+      SOUL_PATH: soulPath,
+      GEMINI_PATH: geminiPath,
     });
 
     assert.strictEqual(result.code, 0, `Should sync and pass, got stderr: ${result.stderr}`);
@@ -513,11 +782,15 @@ function runTests() {
     const zhRootReadme = fs.readFileSync(zhRootReadmePath, 'utf8');
     const zhDocsReadme = fs.readFileSync(zhDocsReadmePath, 'utf8');
     const zhAgentsDoc = fs.readFileSync(zhAgentsPath, 'utf8');
+    const pluginJson = fs.readFileSync(pluginJsonPath, 'utf8');
+    const marketplaceJson = fs.readFileSync(marketplaceJsonPath, 'utf8');
 
     assert.ok(readme.includes('Access to 1 agents, 1 skills, and 1 legacy command shims'), 'Should sync README quick-start summary');
+    assert.ok(readme.includes('actual OSS surface: 9 agents, 9 skills, and 9 legacy command shims'), 'Should preserve historical README release-note summary');
+    assert.ok(readme.includes('|-- agents/           # 1 specialized subagents for delegation'), 'Should sync README project tree agents count');
     assert.ok(readme.includes('| Agents | PASS: 1 agents |'), 'Should sync README comparison table');
     assert.ok(readme.includes('| Skills | 16 | .agents/skills/ |'), 'Should not rewrite unrelated README tables');
-    assert.ok(readme.includes('| **Agents** | 1 | Shared (AGENTS.md) | Shared (AGENTS.md) | 12 |'), 'Should sync README parity table');
+    assert.ok(readme.includes('| **Agents** | 7 | Shared (AGENTS.md) | Shared (AGENTS.md) | 12 |'), 'Should leave obsolete parity prose untouched');
     assert.ok(agentsDoc.includes('providing 1 specialized agents, 1 skills, 1 commands'), 'Should sync AGENTS summary');
     assert.ok(agentsDoc.includes('skills/          — 1 workflow skills and domain knowledge'), 'Should sync AGENTS structure');
     assert.ok(zhRootReadme.includes('你现在可以使用 1 个代理、1 个技能和 1 个命令'), 'Should sync README.zh-CN quick-start summary');
@@ -527,6 +800,12 @@ function runTests() {
     assert.ok(zhDocsReadme.includes('| **智能体** | 1 | 共享 (AGENTS.md) | 共享 (AGENTS.md) | 12 |'), 'Should sync docs/zh-CN/README parity table');
     assert.ok(zhAgentsDoc.includes('提供 1 个专业代理、1 项技能、1 条命令'), 'Should sync docs/zh-CN/AGENTS summary');
     assert.ok(zhAgentsDoc.includes('commands/        — 1 个斜杠命令'), 'Should sync docs/zh-CN/AGENTS structure');
+    assert.ok(pluginJson.includes('1 agents, 1 skills, 1 legacy command shims'), 'Should sync plugin manifest catalog description');
+    assert.ok(marketplaceJson.includes('1 agents, 1 skills, 1 legacy command shims'), 'Should sync marketplace plugin catalog description');
+    const soul = fs.readFileSync(soulPath, 'utf8');
+    const gemini = fs.readFileSync(geminiPath, 'utf8');
+    assert.ok(soul.includes('with 1 specialized agents, 1 skills, 1 commands'), 'Should sync SOUL.md catalog summary');
+    assert.ok(gemini.includes('with 1 specialized agents, 1 skills, and 1 commands'), 'Should sync .gemini/GEMINI.md catalog summary');
 
     cleanupTestDir(testDir);
   })) passed++; else failed++;
@@ -539,6 +818,8 @@ function runTests() {
       zhRootReadmePath,
       zhDocsReadmePath,
       zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
     } = writeCatalogFixture(testDir, {
       structureLines: [
         '  agents/   -   1 specialized subagents   ',
@@ -559,9 +840,82 @@ function runTests() {
       README_ZH_CN_PATH: zhRootReadmePath,
       DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
       DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
     });
 
     assert.strictEqual(result.code, 0, `Should accept formatting variations, got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('flags a stale count hidden in a second README project-tree block', () => {
+    const testDir = createTestDir();
+    const {
+      readmePath,
+      agentsPath,
+      zhRootReadmePath,
+      zhDocsReadmePath,
+      zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
+    } = writeCatalogFixture(testDir, {
+      readmeExtraTreeBlock: '|-- agents/           # 9 specialized subagents for delegation',
+    });
+
+    const result = runCatalogValidator({
+      ROOT: testDir,
+      README_PATH: readmePath,
+      AGENTS_PATH: agentsPath,
+      README_ZH_CN_PATH: zhRootReadmePath,
+      DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
+      DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
+    });
+
+    const output = result.stdout + result.stderr;
+    assert.strictEqual(result.code, 1, `Should fail on a stale second block, got ${output}`);
+    assert.ok(
+      output.includes('README.md project tree (agents) block'),
+      `Should name the offending block, got ${output}`
+    );
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('write mode repairs a stale second README project-tree block', () => {
+    const testDir = createTestDir();
+    const {
+      readmePath,
+      agentsPath,
+      zhRootReadmePath,
+      zhDocsReadmePath,
+      zhAgentsPath,
+      pluginJsonPath,
+      marketplaceJsonPath,
+    } = writeCatalogFixture(testDir, {
+      readmeExtraTreeBlock: '|-- agents/           # 9 specialized subagents for delegation',
+    });
+
+    const result = runCatalogValidator({
+      argv: ['--write', '--text'],
+      ROOT: testDir,
+      README_PATH: readmePath,
+      AGENTS_PATH: agentsPath,
+      README_ZH_CN_PATH: zhRootReadmePath,
+      DOCS_ZH_CN_README_PATH: zhDocsReadmePath,
+      DOCS_ZH_CN_AGENTS_PATH: zhAgentsPath,
+      PLUGIN_JSON_PATH: pluginJsonPath,
+      MARKETPLACE_JSON_PATH: marketplaceJsonPath,
+    });
+
+    assert.strictEqual(result.code, 0, `Should sync every block, got ${result.stderr}`);
+    const readme = fs.readFileSync(readmePath, 'utf8');
+    assert.ok(!readme.includes('# 9 specialized subagents for delegation'), 'Should repair the second block too');
+    assert.strictEqual(
+      readme.split('# 1 specialized subagents for delegation').length - 1,
+      2,
+      'Should correct both blocks'
+    );
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -586,7 +940,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        InvalidEventType: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo hi' }] }]
+        InvalidEventType: [{ id: 'test:invalid-event', matcher: 'test', hooks: [{ type: 'command', command: 'echo hi' }] }]
       }
     }));
 
@@ -601,7 +955,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ command: 'echo hi' }] }]
+        PreToolUse: [{ id: 'test:missing-type', matcher: 'test', hooks: [{ command: 'echo hi' }] }]
       }
     }));
 
@@ -616,7 +970,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command' }] }]
+        PreToolUse: [{ id: 'test:missing-command', matcher: 'test', hooks: [{ type: 'command' }] }]
       }
     }));
 
@@ -631,7 +985,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', async: 'yes' }] }]
+        PreToolUse: [{ id: 'test:invalid-async', matcher: 'test', hooks: [{ type: 'command', command: 'echo', async: 'yes' }] }]
       }
     }));
 
@@ -646,7 +1000,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: -5 }] }]
+        PreToolUse: [{ id: 'test:negative-timeout', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: -5 }] }]
       }
     }));
 
@@ -661,7 +1015,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "function {"' }] }]
+        PreToolUse: [{ id: 'test:invalid-inline-js', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "function {"' }] }]
       }
     }));
 
@@ -676,7 +1030,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "console.log(1+2)"' }] }]
+        PreToolUse: [{ id: 'test:valid-inline-js', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "console.log(1+2)"' }] }]
       }
     }));
 
@@ -685,12 +1039,27 @@ function runTests() {
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
+  if (test('unescapes inline JS in one pass so an escaped backslash before n stays literal', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    // Shell body `console.log('\\n')` is a valid program; a sequential unescape turned it into a raw newline.
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{ id: 'test:escaped-backslash-inline-js', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "console.log(\'\\\\n\')"' }] }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 0, `Should pass escaped-backslash inline JS, stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
   if (test('validates array command format', () => {
     const testDir = createTestDir();
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', '-e', 'console.log(1)'] }] }]
+        PreToolUse: [{ id: 'test:array-command', matcher: 'test', hooks: [{ type: 'command', command: ['node', '-e', 'console.log(1)'] }] }]
       }
     }));
 
@@ -716,7 +1085,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test' }]
+        PreToolUse: [{ id: 'test:missing-hooks', matcher: 'test' }]
       }
     }));
 
@@ -798,6 +1167,181 @@ function runTests() {
     const result = runValidatorWithDir('validate-skills', 'SKILLS_DIR', testDir);
     assert.strictEqual(result.code, 1, 'Should reject whitespace-only SKILL.md');
     assert.ok(result.stderr.includes('Empty file'), 'Should report empty file');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('warns when frontmatter is missing name (default mode)', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'no-name-skill');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\ndescription: "X"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir);
+    assert.strictEqual(result.code, 0,
+      `Default mode must not fail CI; got stderr: ${result.stderr}`);
+    assert.ok(
+      result.stderr.includes('WARN') && result.stderr.includes('missing required field: name'),
+      `Should warn on missing name; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('errors when frontmatter is missing name (strict mode)', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'no-name-skill');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\ndescription: "X"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 1, '--strict must fail CI on missing name');
+    assert.ok(result.stderr.includes('missing required field: name'),
+      'Should report missing name');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('warns on literal block-scalar description (|-)', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'block-desc-skill');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: block-desc-skill\ndescription: |-\n  line one\n  line two\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir);
+    assert.strictEqual(result.code, 0, 'Default mode should not fail CI');
+    assert.ok(
+      result.stderr.includes('WARN') && result.stderr.includes('literal block scalar'),
+      `Should warn on |- description; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('accepts folded (>) and inline descriptions', () => {
+    const testDir = createTestDir();
+    const folded = path.join(testDir, 'folded-skill');
+    fs.mkdirSync(folded);
+    fs.writeFileSync(path.join(folded, 'SKILL.md'),
+      '---\nname: folded-skill\ndescription: >\n  joined\n  on spaces\norigin: ECC\n---\n# Skill');
+    const inline = path.join(testDir, 'inline-skill');
+    fs.mkdirSync(inline);
+    fs.writeFileSync(path.join(inline, 'SKILL.md'),
+      '---\nname: inline-skill\ndescription: "single line"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 0,
+      `Folded and inline should pass strict; got stderr: ${result.stderr}`);
+    assert.ok(result.stdout.includes('Validated 2'),
+      `Should count both skills; got stdout: ${result.stdout}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('skips hidden directories under skills/', () => {
+    const testDir = createTestDir();
+    // A dot-prefixed directory (e.g. .DS_Store-adjacent junk or legacy
+    // cache) must not count as a skill and must not error.
+    fs.mkdirSync(path.join(testDir, '.cache'));
+    fs.writeFileSync(path.join(testDir, '.cache', 'SKILL.md'), '# ignored');
+    const real = path.join(testDir, 'real-skill');
+    fs.mkdirSync(real);
+    fs.writeFileSync(path.join(real, 'SKILL.md'),
+      '---\nname: real-skill\ndescription: "x"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 0, 'Hidden dirs should be skipped');
+    assert.ok(result.stdout.includes('Validated 1'),
+      `Should only count the non-hidden skill; got stdout: ${result.stdout}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('warns when name: value is empty or whitespace', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'empty-name-skill');
+    fs.mkdirSync(skillDir);
+    // `name:` key present but value is blank.
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname:    \ndescription: "X"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir);
+    assert.strictEqual(result.code, 0,
+      `Default mode must not fail CI; got stderr: ${result.stderr}`);
+    assert.ok(
+      result.stderr.includes('WARN') && result.stderr.includes("'name' is empty"),
+      `Should warn on empty name; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('warns on literal block-scalar description with |+ chomp', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'keep-desc-skill');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: keep-desc-skill\ndescription: |+\n  line one\n  line two\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir);
+    assert.strictEqual(result.code, 0, 'Default mode should not fail CI');
+    assert.ok(result.stderr.includes('literal block scalar'),
+      `Should warn on |+ description; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('warns on block-scalar description with indent indicator and trailing comment', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'indent-desc-skill');
+    fs.mkdirSync(skillDir);
+    // `|-2  # note` is still a literal block scalar in YAML 1.2.
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: indent-desc-skill\ndescription: |-2  # trimmed two-space indent\n    line one\n    line two\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir);
+    assert.strictEqual(result.code, 0, 'Default mode should not fail CI');
+    assert.ok(result.stderr.includes('literal block scalar'),
+      `Should warn on |-2 description; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('honors CI_STRICT_SKILLS=1 env flag', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'no-name-skill-env');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\ndescription: "X"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir, [], { CI_STRICT_SKILLS: '1' });
+    assert.strictEqual(result.code, 1, 'CI_STRICT_SKILLS=1 must fail CI on missing name');
+    assert.ok(result.stderr.includes('missing required field: name'),
+      'Should report missing name');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('flags comment-only name value as empty (strict)', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'comment-only-name');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: # todo\ndescription: "X"\norigin: ECC\n---\n# Skill');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 1, 'Strict mode must fail CI on empty name');
+    assert.ok(result.stderr.includes("'name' is empty"),
+      `Should report empty name; got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('tolerates ---trailing text outside frontmatter block', () => {
+    // A SKILL.md whose body contains a line starting with '---text'
+    // must not be parsed as frontmatter. Regression guard for
+    // closing-delimiter tightening: the old regex would greedily
+    // match '---trailing'.
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'no-frontmatter-dashes');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '# Skill\n\nSome body text.\n\n---trailing content\nmore body\n');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 0,
+      `Should not flag frontmatter findings when no valid frontmatter exists; got stderr: ${result.stderr}`);
+    assert.ok(!result.stderr.includes('missing required field: name'),
+      'Must not treat ---trailing as a frontmatter closer');
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -1108,7 +1652,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: '   \t  ' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: '   \t  ' }] }]
       }
     }));
 
@@ -1123,7 +1667,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: null }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: null }] }]
       }
     }));
 
@@ -1138,7 +1682,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 42 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 42 }] }]
       }
     }));
 
@@ -1317,7 +1861,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: '' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: '' }] }]
       }
     }));
 
@@ -1332,7 +1876,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: [] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: [] }] }]
       }
     }));
 
@@ -1347,7 +1891,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', 123, null] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: ['node', 123, null] }] }]
       }
     }));
 
@@ -1362,7 +1906,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 42, command: 'echo hi' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 42, command: 'echo hi' }] }]
       }
     }));
 
@@ -1377,7 +1921,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 'fast' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 'fast' }] }]
       }
     }));
 
@@ -1392,7 +1936,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 0 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 0 }] }]
       }
     }));
 
@@ -1406,7 +1950,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     // data.hooks is undefined, so fallback to data itself
     fs.writeFileSync(hooksFile, JSON.stringify({
-      PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo ok' }] }]
+      PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo ok' }] }]
     }));
 
     const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
@@ -1508,7 +2052,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', '', 'script.js'] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: ['node', '', 'script.js'] }] }]
       }
     }));
 
@@ -1523,7 +2067,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo hi', timeout: -5 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo hi', timeout: -5 }] }]
       }
     }));
 
@@ -1538,7 +2082,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PostToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo ok', async: 'yes' }] }]
+        PostToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo ok', async: 'yes' }] }]
       }
     }));
 
@@ -1559,7 +2103,7 @@ function runTests() {
     manyHooks.push({ type: 'command', command: '' });
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: manyHooks }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: manyHooks }]
       }
     }));
 
@@ -1574,7 +2118,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "const x = 1 + 2; process.exit(0)"' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "const x = 1 + 2; process.exit(0)"' }] }]
       }
     }));
 
@@ -1588,9 +2132,9 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo pre' }] }],
-        PostToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo post' }] }],
-        Stop: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo stop' }] }]
+        PreToolUse: [{ id: 'test:multi-event-pre', matcher: 'test', hooks: [{ type: 'command', command: 'echo pre' }] }],
+        PostToolUse: [{ id: 'test:multi-event-post', matcher: 'test', hooks: [{ type: 'command', command: 'echo post' }] }],
+        Stop: [{ id: 'test:multi-event-stop', matcher: 'test', hooks: [{ type: 'command', command: 'echo stop' }] }]
       }
     }));
 
@@ -1737,6 +2281,28 @@ function runTests() {
     const result = runValidatorWithDir('validate-agents', 'AGENTS_DIR', testDir);
     assert.strictEqual(result.code, 0, 'All valid models should pass');
     assert.ok(result.stdout.includes('3'), 'Should validate 3 agent files');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects agent with duplicate top-level frontmatter keys', () => {
+    const testDir = createTestDir();
+    fs.writeFileSync(path.join(testDir, 'dup-model.md'),
+      '---\nname: dup\nmodel: sonnet\ntools: Read, Write\ndescription: test\nmodel: opus\n---\n# Agent');
+
+    const result = runValidatorWithDir('validate-agents', 'AGENTS_DIR', testDir);
+    assert.strictEqual(result.code, 1, 'Should reject duplicate top-level YAML keys');
+    assert.ok(result.stderr.includes('Duplicate frontmatter keys'), 'Should report duplicate keys');
+    assert.ok(result.stderr.includes('model'), 'Should name the duplicated key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('allows duplicate-looking nested frontmatter keys', () => {
+    const testDir = createTestDir();
+    fs.writeFileSync(path.join(testDir, 'nested.md'),
+      '---\nmodel: sonnet\ntools: Read\nmetadata:\n  model: display-only\n---\n# Agent');
+
+    const result = runValidatorWithDir('validate-agents', 'AGENTS_DIR', testDir);
+    assert.strictEqual(result.code, 0, 'Indented nested keys should not count as top-level duplicates');
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -1917,7 +2483,7 @@ function runTests() {
     // After unescape chain: var a = "ok"\nconsole.log(a) (real newline) — valid JS
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command',
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command',
           command: 'node -e "var a = \\"ok\\"\\nconsole.log(a)"' }] }]
       }
     }));
@@ -1933,7 +2499,7 @@ function runTests() {
     // After unescape this becomes: var x = { — missing closing brace
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command',
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command',
           command: 'node -e "var x = {"' }] }]
       }
     }));
@@ -2117,7 +2683,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: { run: 'echo hi' } }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: { run: 'echo hi' } }] }]
       }
     }));
 
@@ -2136,7 +2702,7 @@ function runTests() {
     // Object format: matcher entry has hooks array but NO matcher field
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ hooks: [{ type: 'command', command: 'echo ok' }] }]
+        PreToolUse: [{ id: 'test:missing-matcher', hooks: [{ type: 'command', command: 'echo ok' }] }]
       }
     }));
 
@@ -2244,6 +2810,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       PreToolUse: [{
+        id: 'test:round72-async',
         matcher: 'Write',
         hooks: [{
           type: 'command',
@@ -2264,6 +2831,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       PostToolUse: [{
+        id: 'test:round72-timeout',
         matcher: 'Edit',
         hooks: [{
           type: 'command',
@@ -2292,7 +2860,21 @@ function runTests() {
     fs.mkdirSync(validSkill, { recursive: true });
     // Broken symlink: target does not exist — statSync will throw ENOENT
     const brokenLink = path.join(skillsDir, 'broken-skill');
-    fs.symlinkSync('/nonexistent/target/path', brokenLink);
+    try {
+      fs.symlinkSync('/nonexistent/target/path', brokenLink);
+    } catch (err) {
+      // Skip only where symlink creation is blocked (e.g. Windows without
+      // Developer Mode / admin rights → EPERM/EACCES); rethrow anything else
+      // so real failures aren't masked.
+      if (err && (err.code === 'EPERM' || err.code === 'EACCES')) {
+        console.log('    (skipped — symlinks not supported)');
+        cleanupTestDir(testDir);
+        cleanupTestDir(agentsDir);
+        fs.rmSync(skillsDir, { recursive: true, force: true });
+        return;
+      }
+      throw err;
+    }
 
     // Command that references the valid skill (should resolve)
     fs.writeFileSync(path.join(testDir, 'cmd.md'),
@@ -2337,8 +2919,8 @@ function runTests() {
     fs.writeFileSync(hooksFile, JSON.stringify({
       "$schema": "https://json.schemastore.org/claude-code-settings.json",
       hooks: {
-        PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'echo ok' }] }],
-        PostToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: 'echo done' }] }]
+        PreToolUse: [{ id: 'test:wrapped-pre', matcher: 'Write', hooks: [{ type: 'command', command: 'echo ok' }] }],
+        PostToolUse: [{ id: 'test:wrapped-post', matcher: 'Read', hooks: [{ type: 'command', command: 'echo done' }] }]
       }
     }));
 
@@ -2347,6 +2929,105 @@ function runTests() {
       `Should pass wrapped hooks format, got exit ${result.code}. stderr: ${result.stderr}`);
     assert.ok(result.stdout.includes('Validated 2'),
       `Should validate 2 matchers, got: ${result.stdout}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry missing id', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo missing id' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject wrapped matcher entries without an id');
+    assert.ok(result.stderr.includes('id'), `Should report missing id, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry missing a required matcher', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        SessionStart: [{
+          id: 'test:missing-matcher',
+          hooks: [{ type: 'command', command: 'echo start' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1);
+    assert.ok(result.stderr.includes('matcher'), result.stderr);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry with an empty handlers array', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: { Stop: [{ id: 'test:empty-handlers', hooks: [] }] }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1);
+    assert.ok(result.stderr.includes('hooks'), result.stderr);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry with whitespace-only id', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: '   \t',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo blank id' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject whitespace-only matcher ids');
+    assert.ok(result.stderr.includes('id'), `Should report invalid id, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects duplicate wrapped matcher ids across events', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: 'shared:matcher',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo pre' }]
+        }],
+        PostToolUse: [{
+          id: 'shared:matcher',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo post' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject matcher ids reused by another event');
+    assert.ok(
+      result.stderr.includes("duplicate id 'shared:matcher'"),
+      `Should report the duplicate id, got: ${result.stderr}`
+    );
+    assert.ok(
+      result.stderr.includes('PreToolUse[0]') && result.stderr.includes('PostToolUse[0]'),
+      `Should report both matcher locations, got: ${result.stderr}`
+    );
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -2432,6 +3113,7 @@ function runTests() {
       hooks: {
         UserPromptSubmit: [
           {
+            id: 'test:user-prompt-submit',
             hooks: [
               { type: 'prompt', prompt: 'Summarize the request.' },
               { type: 'agent', prompt: 'Review for security issues.', model: 'gpt-5.4' },
@@ -2483,6 +3165,148 @@ function runTests() {
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
+  // ── Round 84: validate-skills docs/{locale}/skills/ mirror scan (#2630) ──
+
+  console.log('\nRound 84: validate-skills.js (docs/{locale}/skills/ frontmatter, #2630):');
+
+  if (test('flags a glued key onto description as invalid YAML', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'ja-JP', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: some text.license: Apache-2.0\nversion: 1.0.0\n---\n# Example');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 1, 'Should fail on glued key');
+    assert.ok(result.stderr.includes("unquoted value contains ': '"),
+      `Should report the glued-key defect, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('flags a dropped-quote description containing a colon as invalid YAML', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'ja-JP', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: Verification loop: migrations, linting\n---\n# Example');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 1, 'Should fail on unquoted colon in description');
+    assert.ok(result.stderr.includes("unquoted value contains ': '"),
+      `Should report the dropped-quote defect, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('flags a description starting with the reserved @ indicator', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'ja-JP', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: @Observable state management\n---\n# Example');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 1, 'Should fail on leading @');
+    assert.ok(result.stderr.includes("reserved character '@'"),
+      `Should report the reserved-indicator defect, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('preserves # inside a quoted frontmatter value', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'ja-JP', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: "Fix: details #tag" # translation note\n---\n# Example');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 0,
+      `Quoted # content must remain valid, got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects malformed quoted skill frontmatter', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'malformed-quote');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: malformed-quote\ndescription: "unterminated\n---\n# Example');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 1, 'Strict validation must reject malformed YAML');
+    assert.ok(result.stderr.includes('invalid YAML'),
+      `Should report the YAML parse failure, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects an empty folded skill description', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'empty-folded-description');
+    fs.mkdirSync(skillDir);
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: empty-folded-description\ndescription: >\n---\n# Example');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 1, 'Strict validation must reject an empty folded scalar');
+    assert.ok(result.stderr.includes("'description' is empty"),
+      `Should report the empty parsed description, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('reports an unreadable docs root deterministically', () => {
+    const testDir = createTestDir();
+    const docsPath = path.join(testDir, 'docs-file');
+    fs.writeFileSync(docsPath, 'not a directory');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsPath);
+    assert.strictEqual(result.code, 1, 'Should fail when the docs root cannot be read');
+    assert.strictEqual(result.stderr.trim(), 'ERROR: unable to read docs directory');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('flags a docs mirror SKILL.md with no frontmatter block at all', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'ja-JP', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# Example\n\nNo frontmatter here.');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 1, 'Should fail when docs mirror has no frontmatter');
+    assert.ok(result.stderr.includes('no frontmatter block found'),
+      `Should report the missing-frontmatter defect, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('curated skills/ still tolerates a SKILL.md with no frontmatter (unchanged)', () => {
+    const testDir = createTestDir();
+    const skillDir = path.join(testDir, 'no-frontmatter-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# Example\n\nNo frontmatter here.');
+
+    const result = runSkillsValidator(testDir, ['--strict']);
+    assert.strictEqual(result.code, 0,
+      `Curated skills/ must not require frontmatter, got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('passes on a valid docs/{locale}/skills/ mirror', () => {
+    const testDir = createTestDir();
+    const docsDir = path.join(testDir, 'docs-root');
+    const skillDir = path.join(docsDir, 'zh-CN', 'skills', 'example');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: "Well-formed: quoted value"\n---\n# Example');
+
+    const result = runSkillsValidator('/nonexistent/skills-dir', ['--strict'], {}, docsDir);
+    assert.strictEqual(result.code, 0, `Should pass on well-formed mirror, got: ${result.stderr}`);
+    assert.ok(result.stdout.includes('Validated 1'), 'Should count the one docs skill file');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
   // ==========================================
   // validate-install-manifests.js
   // ==========================================
@@ -2492,6 +3316,99 @@ function runTests() {
     const result = runValidator('validate-install-manifests');
     assert.strictEqual(result.code, 0, `Should pass, got stderr: ${result.stderr}`);
     assert.ok(result.stdout.includes('Validated'), 'Should output validation count');
+  })) passed++; else failed++;
+
+  if (test('fails when a curated skill is not referenced by any install module', () => {
+    const testDir = createTestDir();
+    try {
+      writeInstallModulesManifest(testDir, [
+        {
+          id: 'skill-alpha',
+          kind: 'skills',
+          description: 'Alpha skill',
+          paths: ['skills/alpha'],
+          targets: ['claude'],
+          dependencies: [],
+          defaultInstall: false,
+          cost: 'light',
+          stability: 'stable',
+        },
+        {
+          id: 'skill-beta',
+          kind: 'skills',
+          description: 'Beta skill',
+          paths: ['skills/beta'],
+          targets: ['claude'],
+          dependencies: [],
+          defaultInstall: false,
+          cost: 'light',
+          stability: 'stable',
+        },
+      ]);
+      writeInstallProfilesManifest(testDir, {
+        core: { description: 'Core', modules: ['skill-alpha', 'skill-beta'] },
+        developer: { description: 'Developer', modules: ['skill-alpha', 'skill-beta'] },
+        security: { description: 'Security', modules: ['skill-alpha', 'skill-beta'] },
+        research: { description: 'Research', modules: ['skill-alpha', 'skill-beta'] },
+        full: { description: 'Full', modules: ['skill-alpha', 'skill-beta'] },
+      });
+      writeSkillFixture(testDir, 'alpha', 'Alpha skill');
+      writeSkillFixture(testDir, 'beta', 'Beta skill');
+
+      let result = runValidatorWithDirs('validate-install-manifests', {
+        REPO_ROOT: testDir,
+        MODULES_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-modules.json'),
+        PROFILES_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-profiles.json'),
+        COMPONENTS_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-components.json'),
+        MODULES_SCHEMA_PATH: modulesSchemaPath,
+        PROFILES_SCHEMA_PATH: profilesSchemaPath,
+        COMPONENTS_SCHEMA_PATH: componentsSchemaPath,
+      });
+      assert.strictEqual(result.code, 0, `Should pass with both skills referenced, got stderr: ${result.stderr}`);
+
+      writeInstallModulesManifest(testDir, [
+        {
+          id: 'skill-alpha',
+          kind: 'skills',
+          description: 'Alpha skill',
+          paths: ['skills/alpha'],
+          targets: ['claude'],
+          dependencies: [],
+          defaultInstall: false,
+          cost: 'light',
+          stability: 'stable',
+        },
+        {
+          id: 'skill-beta',
+          kind: 'skills',
+          description: 'Beta skill',
+          paths: ['skills/beta-restored'],
+          targets: ['claude'],
+          dependencies: [],
+          defaultInstall: false,
+          cost: 'light',
+          stability: 'stable',
+        },
+      ]);
+      writeSkillFixture(testDir, 'beta-restored', 'Beta skill restored');
+
+      result = runValidatorWithDirs('validate-install-manifests', {
+        REPO_ROOT: testDir,
+        MODULES_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-modules.json'),
+        PROFILES_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-profiles.json'),
+        COMPONENTS_MANIFEST_PATH: path.join(testDir, 'manifests', 'install-components.json'),
+        MODULES_SCHEMA_PATH: modulesSchemaPath,
+        PROFILES_SCHEMA_PATH: profilesSchemaPath,
+        COMPONENTS_SCHEMA_PATH: componentsSchemaPath,
+      });
+      assert.strictEqual(result.code, 1, 'Should fail when beta is no longer referenced');
+      assert.ok(
+        result.stderr.includes('curated skill skills/beta is not referenced by any install module'),
+        `Should report unreferenced skill, got: ${result.stderr}`
+      );
+    } finally {
+      cleanupTestDir(testDir);
+    }
   })) passed++; else failed++;
 
   if (test('exits 0 when install manifests do not exist', () => {

@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const { readHooksConfig } = require('../../scripts/lib/hooks-config');
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
 // Test helper
@@ -40,6 +41,13 @@ async function asyncTest(name, fn) {
   }
 }
 
+// Hook scripts write session data, learned skills and homunculus observations
+// under the home directory, so runs get an empty home instead of the developer's
+// real one unless a test passes its own HOME.
+const ISOLATED_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-integration-home-'));
+const ISOLATED_HOME_ENV = { HOME: ISOLATED_HOME, USERPROFILE: ISOLATED_HOME };
+process.on('exit', () => fs.rmSync(ISOLATED_HOME, { recursive: true, force: true }));
+
 /**
  * Run a hook script with simulated Claude Code input
  * @param {string} scriptPath - Path to the hook script
@@ -50,7 +58,7 @@ async function asyncTest(name, fn) {
 function runHookWithInput(scriptPath, input = {}, env = {}, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', [scriptPath], {
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...ISOLATED_HOME_ENV, ...env },
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -109,7 +117,7 @@ function getSessionStartPayload(stdout) {
 function runHookCommand(command, input = {}, env = {}, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === 'win32';
-    const mergedEnv = { ...process.env, CLAUDE_PLUGIN_ROOT: REPO_ROOT, ...env };
+    const mergedEnv = { ...process.env, ...ISOLATED_HOME_ENV, CLAUDE_PLUGIN_ROOT: REPO_ROOT, ...env };
     if (Array.isArray(command)) {
       const [program, ...args] = command;
       const proc = spawn(program, args, { env: mergedEnv, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -226,6 +234,15 @@ function cleanupTestDir(testDir) {
   fs.rmSync(testDir, { recursive: true, force: true });
 }
 
+function getTestHomunculusEnv(testDir) {
+  const xdgDataHome = path.join(testDir, '.local', 'share');
+  return {
+    HOME: testDir,
+    XDG_DATA_HOME: xdgDataHome,
+    homunculusDir: path.join(xdgDataHome, 'ecc-homunculus'),
+  };
+}
+
 function writeInstinctFile(filePath, entries) {
   const body = entries.map(entry => `---
 id: ${entry.id}
@@ -273,7 +290,7 @@ async function runTests() {
 
   const scriptsDir = path.join(__dirname, '..', '..', 'scripts', 'hooks');
   const hooksJsonPath = path.join(__dirname, '..', '..', 'hooks', 'hooks.json');
-  const hooks = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf8'));
+  const hooks = readHooksConfig(hooksJsonPath);
 
   // ==========================================
   // Input Format Tests
@@ -287,6 +304,7 @@ async function runTests() {
 
   if (await asyncTest('hooks handle malformed JSON input', async () => {
     const proc = spawn('node', [path.join(scriptsDir, 'session-start.js')], {
+      env: { ...process.env, ...ISOLATED_HOME_ENV },
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -380,19 +398,20 @@ async function runTests() {
 
     try {
       const sessionId = `session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
       const result = await runHookWithInput(
         path.join(scriptsDir, 'session-start.js'),
         {},
         {
-          HOME: testDir,
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
           CLAUDE_PROJECT_DIR: projectDir,
           CLAUDE_SESSION_ID: sessionId
         }
       );
 
       assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
-      const homunculusDir = path.join(testDir, '.claude', 'homunculus');
-      const projectsDir = path.join(homunculusDir, 'projects');
+      const projectsDir = path.join(homunculusEnv.homunculusDir, 'projects');
       const projectEntries = fs.existsSync(projectsDir) ? fs.readdirSync(projectsDir) : [];
       assert.ok(projectEntries.length > 0, 'SessionStart should create a homunculus project directory');
       const leaseDir = path.join(projectsDir, projectEntries[0], '.observer-sessions');
@@ -410,7 +429,8 @@ async function runTests() {
 
     try {
       const projectId = crypto.createHash('sha256').update(projectDir).digest('hex').slice(0, 12);
-      const homunculusDir = path.join(testDir, '.claude', 'homunculus');
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      const homunculusDir = homunculusEnv.homunculusDir;
       const projectInstinctDir = path.join(homunculusDir, 'projects', projectId, 'instincts', 'personal');
       const globalInstinctDir = path.join(homunculusDir, 'instincts', 'inherited');
 
@@ -445,7 +465,8 @@ async function runTests() {
         path.join(scriptsDir, 'session-start.js'),
         {},
         {
-          HOME: testDir,
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
           CLAUDE_PROJECT_DIR: projectDir,
         }
       );
@@ -474,18 +495,19 @@ async function runTests() {
     });
 
     try {
+      const homunculusEnv = getTestHomunculusEnv(testDir);
       await runHookWithInput(
         path.join(scriptsDir, 'session-start.js'),
         {},
         {
-          HOME: testDir,
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
           CLAUDE_PROJECT_DIR: projectDir,
           CLAUDE_SESSION_ID: sessionId
         }
       );
 
-      const homunculusDir = path.join(testDir, '.claude', 'homunculus');
-      const projectsDir = path.join(homunculusDir, 'projects');
+      const projectsDir = path.join(homunculusEnv.homunculusDir, 'projects');
       const projectEntries = fs.existsSync(projectsDir) ? fs.readdirSync(projectsDir) : [];
       assert.ok(projectEntries.length > 0, 'Expected SessionStart to create a homunculus project directory');
       const projectStorageDir = path.join(projectsDir, projectEntries[0]);
@@ -497,7 +519,8 @@ async function runTests() {
         path.join(scriptsDir, 'session-end-marker.js'),
         markerInput,
         {
-          HOME: testDir,
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
           CLAUDE_PROJECT_DIR: projectDir,
           CLAUDE_SESSION_ID: sessionId
         }
@@ -661,16 +684,23 @@ async function runTests() {
   })) passed++; else failed++;
 
   if (await asyncTest('PostToolUse PR hook extracts PR URL', async () => {
-    const hookCommand = getHookCommandById(hooks, 'PostToolUse', 'post:bash:dispatcher');
-    const result = await runHookCommand(hookCommand, {
-      tool_input: { command: 'gh pr create --title "Test"' },
-      tool_output: { output: 'Creating pull request...\nhttps://github.com/owner/repo/pull/123' }
-    });
+    const hookCommand = getHookCommandById(hooks, 'PostToolUse', 'post:dispatcher:async');
+    const testDir = createTestDir();
+    try {
+      const result = await runHookCommand(hookCommand, {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'gh pr create --title "Test"' },
+        tool_output: { output: 'Creating pull request...\nhttps://github.com/owner/repo/pull/123' }
+      }, { HOME: testDir, USERPROFILE: testDir });
 
-    assert.ok(
-      result.stderr.includes('PR created') || result.stderr.includes('github.com'),
-      'Should extract and log PR URL'
-    );
+      assert.ok(
+        result.stderr.includes('PR created') || result.stderr.includes('github.com'),
+        'Should extract and log PR URL'
+      );
+    } finally {
+      cleanupTestDir(testDir);
+    }
   })) passed++; else failed++;
 
   // ==========================================
@@ -833,8 +863,8 @@ async function runTests() {
   })) passed++; else failed++;
 
   if (await asyncTest('hooks survive stdin exceeding 1MB limit', async () => {
-    // The post-edit-console-warn hook reads stdin up to 1MB then passes through
-    // Send > 1MB to verify truncation doesn't crash the hook
+    // Direct invocation preserves the complete payload. Send >1MB to verify
+    // the pass-through path remains stable under backpressure.
     const oversizedInput = JSON.stringify({
       tool_input: { file_path: '/test.js' },
       tool_output: { output: 'x'.repeat(1200000) } // ~1.2MB
@@ -865,6 +895,7 @@ async function runTests() {
     // session-end parses stdin JSON. If input is > 1MB and truncated mid-JSON,
     // JSON.parse should fail and fall back to env var
     const proc = spawn('node', [path.join(scriptsDir, 'session-end.js')], {
+      env: { ...process.env, ...ISOLATED_HOME_ENV },
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -982,6 +1013,13 @@ async function runTests() {
           const isShellScriptPath =
             (Array.isArray(command) && typeof command[0] === 'string' && command[0].endsWith('.sh')) ||
             commandText.endsWith('.sh');
+
+          if (isInline) {
+            assert.ok(
+              !commandText.includes('\\"'),
+              `Hook command in ${hookType} should not include escaped double quotes in node -e payload: ${commandText.substring(0, 80)}`
+            );
+          }
 
           assert.ok(
             isInline || isFilePath || isNpx || isShellWrapper || isShellScriptPath,

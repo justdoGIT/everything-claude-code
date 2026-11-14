@@ -2,6 +2,11 @@
 'use strict';
 
 const { isHookEnabled } = require('../lib/hook-flags');
+const { readStdinRaw } = require('./hook-input');
+const {
+  buildPreToolUseAdditionalContext,
+  combineAdditionalContext,
+} = require('./pretooluse-visible-output');
 
 const { run: runBlockNoVerify } = require('./block-no-verify');
 const { run: runAutoTmuxDev } = require('./auto-tmux-dev');
@@ -68,21 +73,6 @@ const POST_BASH_HOOKS = [
   },
 ];
 
-function readStdinRaw() {
-  return new Promise(resolve => {
-    let raw = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => {
-      if (raw.length < MAX_STDIN) {
-        const remaining = MAX_STDIN - raw.length;
-        raw += chunk.substring(0, remaining);
-      }
-    });
-    process.stdin.on('end', () => resolve(raw));
-    process.stdin.on('error', () => resolve(raw));
-  });
-}
-
 function normalizeHookResult(previousRaw, output) {
   if (typeof output === 'string' || Buffer.isBuffer(output)) {
     return {
@@ -93,7 +83,9 @@ function normalizeHookResult(previousRaw, output) {
   }
 
   if (output && typeof output === 'object') {
-    const nextRaw = Object.prototype.hasOwnProperty.call(output, 'stdout')
+    const nextRaw = Object.prototype.hasOwnProperty.call(output, 'additionalContext')
+      ? previousRaw
+      : Object.prototype.hasOwnProperty.call(output, 'stdout')
       ? String(output.stdout ?? '')
       : !Number.isInteger(output.exitCode) || output.exitCode === 0
         ? previousRaw
@@ -102,6 +94,7 @@ function normalizeHookResult(previousRaw, output) {
     return {
       raw: nextRaw,
       stderr: typeof output.stderr === 'string' ? output.stderr : '',
+      additionalContext: output.additionalContext,
       exitCode: Number.isInteger(output.exitCode) ? output.exitCode : 0,
     };
   }
@@ -115,7 +108,14 @@ function normalizeHookResult(previousRaw, output) {
 
 function runHooks(rawInput, hooks) {
   let currentRaw = rawInput;
+  // Track whether a sub-hook deliberately produced stdout (a string or
+  // {stdout}) versus currentRaw still being the untouched input event.
+  // Echoing the unmodified input event back to stdout fails Claude Code's
+  // hook-output JSON schema validation ("(root): Invalid input"), so in the
+  // pass-through case we must emit nothing instead.
+  let rawModified = false;
   let stderr = '';
+  let additionalContext = '';
 
   for (const hook of hooks) {
     if (!isHookEnabled(hook.id, { profiles: hook.profiles })) {
@@ -124,19 +124,39 @@ function runHooks(rawInput, hooks) {
 
     try {
       const result = normalizeHookResult(currentRaw, hook.run(currentRaw));
+      if (result.raw !== currentRaw) {
+        rawModified = true;
+      }
       currentRaw = result.raw;
       if (result.stderr) {
         stderr += result.stderr.endsWith('\n') ? result.stderr : `${result.stderr}\n`;
       }
+      if (result.additionalContext) {
+        additionalContext = combineAdditionalContext(additionalContext, result.additionalContext);
+      }
       if (result.exitCode !== 0) {
-        return { output: currentRaw, stderr, exitCode: result.exitCode };
+        return {
+          output: rawModified ? currentRaw : '',
+          stderr,
+          additionalContext,
+          exitCode: result.exitCode,
+        };
       }
     } catch (error) {
       stderr += `[Hook] ${hook.id} failed: ${error.message}\n`;
     }
   }
 
-  return { output: currentRaw, stderr, exitCode: 0 };
+  return {
+    output: additionalContext
+      ? buildPreToolUseAdditionalContext(additionalContext)
+      : rawModified
+        ? currentRaw
+        : '',
+    stderr,
+    additionalContext,
+    exitCode: 0,
+  };
 }
 
 function runPreBash(rawInput) {
@@ -149,7 +169,19 @@ function runPostBash(rawInput) {
 
 async function main() {
   const mode = process.argv[2];
-  const raw = await readStdinRaw();
+  // The shared reader also settles on close and on an idle deadline, so a
+  // parent that never closes stdin cannot hang the dispatcher (#3665).
+  const { raw, truncated } = await readStdinRaw(process.stdin, { maxStdin: MAX_STDIN });
+  if (truncated) {
+    // Safety hooks cannot inspect a partial request, so pre-Bash fails closed.
+    // Post-Bash has nothing left to block and must not echo a partial payload.
+    const blocking = mode !== 'post';
+    process.stderr.write(
+      `[Hook] incomplete stdin for bash-hook-dispatcher ${blocking ? 'pre' : 'post'}; ` +
+        (blocking ? 'blocking because safety checks require the complete request\n' : 'skipping post-Bash hooks\n')
+    );
+    process.exit(blocking ? 2 : 0);
+  }
 
   const result = mode === 'post'
     ? runPostBash(raw)

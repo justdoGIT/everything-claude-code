@@ -2,6 +2,8 @@
 
 マルチモデル協調計画 - コンテキスト取得 + デュアルモデル分析 → ステップバイステップの実装計画を生成。
 
+> **前提条件:** このコマンドは外部の `ccg-workflow` ランタイムを必要とします。これはベースの ECC インストールには**含まれていません**。`npx ccg-workflow` を実行して初期化し、このコマンドが依存する `~/.claude/bin/codeagent-wrapper` と `~/.claude/.ccg/prompts/*` ロールファイルをプロビジョニングしてください。このランタイムがないと、このコマンドは正しく動作しません。
+
 $ARGUMENTS
 
 ---
@@ -22,7 +24,7 @@ $ARGUMENTS
 
 ```
 Bash({
-  command: "~/.claude/bin/codeagent-wrapper {{LITE_MODE_FLAG}}--backend <codex|gemini> {{GEMINI_MODEL_FLAG}}- \"$PWD\" <<'EOF'
+  command: "~/.claude/bin/codeagent-wrapper --backend <codex|gemini> - \"$PWD\" <<'EOF'
 ROLE_FILE: <ロールプロンプトパス>
 <TASK>
 Requirement: <強化された要件>
@@ -37,7 +39,7 @@ EOF",
 ```
 
 **モデルパラメータの注意事項**:
-- `{{GEMINI_MODEL_FLAG}}`: `--backend gemini`を使用する場合、`--gemini-model gemini-3-pro-preview`で置き換える(末尾のスペースに注意); codexの場合は空文字列を使用
+- ``: `--backend gemini`を使用する場合、`--gemini-model gemini-3-pro-preview`で置き換える(末尾のスペースに注意); codexの場合は空文字列を使用
 
 **ロールプロンプト**:
 

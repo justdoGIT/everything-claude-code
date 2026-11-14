@@ -533,7 +533,7 @@ func ProcessRequest(data []byte) []byte {
 
     buf.Write(data)
     // Process...
-    return buf.Bytes()
+    return bytes.Clone(buf.Bytes()) // copy: buf goes back to the pool on return
 }
 ```
 
@@ -616,7 +616,8 @@ linters-settings:
   errcheck:
     check-type-assertions: true
   govet:
-    check-shadowing: true
+    enable:
+      - shadow
 
 issues:
   exclude-use-default: false
